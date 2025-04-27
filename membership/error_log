@@ -1,0 +1,30 @@
+[05-Mar-2025 15:51:25 UTC] SQLSTATE[42S22]: Column not found: 1054 Unknown column 'm.mode_of_registration' in 'WHERE'
+[05-Mar-2025 15:52:30 UTC] SQLSTATE[42S22]: Column not found: 1054 Unknown column 'm.status' in 'WHERE'
+[05-Mar-2025 15:53:39 UTC] No pending registrations found. SQL: 
+        SELECT m.*, 
+               bc.class_name as bible_class_name,
+               o.organization_name as organization_name,
+               mt.type_name as member_type
+        FROM members m
+        LEFT JOIN bible_classes bc ON m.bible_class_id = bc.id
+        LEFT JOIN organizations o ON m.organization_id = o.id
+        LEFT JOIN member_types mt ON m.member_type_id = mt.id
+        WHERE m.mode_of_registration = 'SELF_REGISTRATION' 
+        AND m.status = 'PENDING'
+        ORDER BY m.created_at DESC
+    
+[05-Mar-2025 15:53:39 UTC] Total matching records without joins: 0
+[05-Mar-2025 15:54:53 UTC] No pending registrations found. SQL: 
+        SELECT m.*, 
+               bc.class_name as bible_class_name,
+               o.organization_name as organization_name,
+               mt.type_name as member_type
+        FROM members m
+        LEFT JOIN bible_classes bc ON m.bible_class_id = bc.id
+        LEFT JOIN organizations o ON m.organization_id = o.id
+        LEFT JOIN member_types mt ON m.member_type_id = mt.id
+        WHERE m.mode_of_registration = 'SELF_REGISTRATION' 
+        AND m.status = 'PENDING'
+        ORDER BY m.created_at DESC
+    
+[05-Mar-2025 15:54:53 UTC] Total matching records without joins: 0

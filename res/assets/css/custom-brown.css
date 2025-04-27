@@ -1,0 +1,46 @@
+:root {
+    --primary-color: #964B00;
+}
+
+/* Override blue colors with brown */
+.text-primary, .text-primary a {
+    color: #964B00 !important;
+}
+
+a {
+    color: #964B00;
+}
+
+a:hover, a:focus {
+    color: #7A3D00;
+}
+
+.nav-primary > .nav-item a:hover i,
+.nav-primary > .nav-item a:focus i,
+.nav-primary > .nav-item.active a i {
+    color: #964B00 !important;
+}
+
+.sidebar[data-background-color="blue"],
+.sidebar[data-background-color="blue2"] {
+    background: #964B00 !important;
+}
+
+.card-pricing2.card-primary {
+    border-bottom-color: #964B00;
+}
+
+.btn-primary {
+    background: #964B00;
+    border-color: #964B00;
+}
+
+.btn-primary:hover {
+    background: #7A3D00;
+    border-color: #7A3D00;
+}
+
+/* Add this class to elements you want to make brown */
+.brown-theme {
+    color: #964B00;
+}

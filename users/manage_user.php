@@ -1,6 +1,7 @@
 <?php
 require_once __DIR__ . '/../includes/auth.php';
 require_once __DIR__ . '/../includes/AuditLogger.php';
+require_once __DIR__ . '/../config.php'; // Make sure config is included for SMS API keys
 
 // Add session check
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role'])) {
@@ -8,9 +9,40 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role'])) {
     exit();
 }
 
+// Function to send SMS using mNotify
+function sendSMS($phone, $message) {
+    $apiKey = MNOTIFY_API_KEY;
+    $senderId = MNOTIFY_SENDER_ID;
+    $url = 'https://apps.mnotify.net/smsapi';
+
+    $queryParams = http_build_query([
+        'key' => $apiKey,
+        'to' => $phone,
+        'msg' => $message,
+        'sender_id' => $senderId
+    ]);
+
+    $fullUrl = $url . '?' . $queryParams;
+
+    // Use file_get_contents to send the request
+    $response = file_get_contents($fullUrl);
+
+    if ($response === FALSE) {
+        return [
+            'status' => 'error',
+            'response' => 'Failed to send SMS'
+        ];
+    }
+
+    return [
+        'status' => 'success',
+        'response' => $response
+    ];
+}
+
 // Check if user has appropriate role for user management
 $allowedRoles = [
-    'admin',           // Super user with full access
+    'seer',           // Super user with full access
     'audit'
 ];
 
@@ -32,7 +64,7 @@ $logger = new AuditLogger($pdo);
 
 // Fetch available roles based on user's role
 try {
-    if ($_SESSION['user_role'] === 'admin') {
+    if ($_SESSION['user_role'] === 'seer') {
         // Seer can assign any role
         $stmt = $pdo->query("SELECT role_key, name FROM roles ORDER BY name");
     } else {
@@ -56,8 +88,8 @@ if (isset($_GET['id'])) {
     
     // Get user with member information
     $stmt = $pdo->prepare("SELECT u.*, 
-                                 CONCAT(m.first_name, ' ', m.surname) as member_name,
-                                 m.contact_number_1 as member_phone 
+                                 m.name as member_name,
+                                 m.phone as member_phone 
                           FROM users u 
                           LEFT JOIN members m ON u.member_id = m.id 
                           WHERE u.id = ?");
@@ -188,6 +220,80 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             "Created new user: $full_name with role: $role", 
                             $_SESSION['user_id']);
 
+                // Send SMS with credentials if phone number is available
+                if (!empty($phone)) {
+                    // Format phone number (remove leading zero and add country code if needed)
+                    $formattedPhone = $phone;
+                    if (substr($formattedPhone, 0, 1) === '0') {
+                        $formattedPhone = '233' . substr($formattedPhone, 1);
+                    }
+                    
+                    // Get role display name
+                    $roleStmt = $pdo->prepare("SELECT name FROM roles WHERE role_key = ?");
+                    $roleStmt->execute([$role]);
+                    $roleName = $roleStmt->fetchColumn() ?: $role;
+                    
+                    // Create SMS message with credentials
+                    $smsMessage = "Dear $full_name, your account has been created on Outpouring Oasis CRM. Your login details are: Username: $username, Password: {$_POST['password']}, Role: $roleName. Please change your password after first login.";
+                    
+                    // Send SMS
+                    $smsResponse = sendSMS($formattedPhone, $smsMessage);
+                    
+                    // Log SMS status
+                    $logger->log(
+                        'sms_notification', 
+                        'users', 
+                        $userId,
+                        "SMS notification for new user account", 
+                        $_SESSION['user_id'],
+                        [
+                            'phone' => $formattedPhone,
+                            'status' => $smsResponse['status'],
+                            'response' => $smsResponse['response']
+                        ],
+                        $smsResponse['status'] === 'success' ? 'success' : 'failed'
+                    );
+                } else if (!empty($member_id)) {
+                    // Try to get phone from linked member
+                    $memberStmt = $pdo->prepare("SELECT phone FROM members WHERE id = ?");
+                    $memberStmt->execute([$member_id]);
+                    $memberPhone = $memberStmt->fetchColumn();
+                    
+                    if (!empty($memberPhone)) {
+                        // Format phone number
+                        $formattedPhone = $memberPhone;
+                        if (substr($formattedPhone, 0, 1) === '0') {
+                            $formattedPhone = '233' . substr($formattedPhone, 1);
+                        }
+                        
+                        // Get role display name
+                        $roleStmt = $pdo->prepare("SELECT name FROM roles WHERE role_key = ?");
+                        $roleStmt->execute([$role]);
+                        $roleName = $roleStmt->fetchColumn() ?: $role;
+                        
+                        // Create SMS message with credentials
+                        $smsMessage = "Dear $full_name, your account has been created on Outpouring Oasis CRM. Your login details are: Username: $username, Password: {$_POST['password']}, Role: $roleName. Please change your password after first login.";
+                        
+                        // Send SMS
+                        $smsResponse = sendSMS($formattedPhone, $smsMessage);
+                        
+                        // Log SMS status
+                        $logger->log(
+                            'sms_notification', 
+                            'users', 
+                            $userId,
+                            "SMS notification for new user account (member phone)", 
+                            $_SESSION['user_id'],
+                            [
+                                'phone' => $formattedPhone,
+                                'status' => $smsResponse['status'],
+                                'response' => $smsResponse['response']
+                            ],
+                            $smsResponse['status'] === 'success' ? 'success' : 'failed'
+                        );
+                    }
+                }
+
                 $_SESSION['message'] = "<div class='alert alert-success'>User created successfully!</div>";
             } catch (Exception $e) {
                 $pdo->rollBack();
@@ -263,6 +369,73 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     throw new Exception("Failed to update user details.");
                 }
 
+                // Check if password was updated
+                $passwordUpdated = false;
+                $newPassword = '';
+                if (!empty($_POST['password'])) {
+                    // Update password and reset password_changed flag
+                    $hashed_password = password_hash($_POST['password'], PASSWORD_DEFAULT);
+                    $stmt = $pdo->prepare("UPDATE users SET password = ?, password_changed = 0 WHERE id = ?");
+                    if (!$stmt->execute([$hashed_password, $_POST['id']])) {
+                        throw new Exception("Failed to update password.");
+                    }
+                    $passwordUpdated = true;
+                    $newPassword = $_POST['password'];
+                }
+
+                // Get user's phone number for SMS
+                $userPhone = $phone; // From the form
+                $memberPhone = null;
+                
+                // If no direct phone but linked to member, get member's phone
+                if (empty($userPhone) && !empty($member_id)) {
+                    $memberStmt = $pdo->prepare("SELECT phone FROM members WHERE id = ?");
+                    $memberStmt->execute([$member_id]);
+                    $memberPhone = $memberStmt->fetchColumn();
+                }
+                
+                // Get username for SMS
+                $usernameStmt = $pdo->prepare("SELECT username FROM users WHERE id = ?");
+                $usernameStmt->execute([$_POST['id']]);
+                $username = $usernameStmt->fetchColumn();
+                
+                // Get role display name
+                $roleStmt = $pdo->prepare("SELECT name FROM roles WHERE role_key = ?");
+                $roleStmt->execute([$role]);
+                $roleName = $roleStmt->fetchColumn() ?: $role;
+                
+                // If password was updated and we have a phone number, send SMS with new credentials
+                if ($passwordUpdated && (!empty($userPhone) || !empty($memberPhone))) {
+                    $phoneToUse = !empty($userPhone) ? $userPhone : $memberPhone;
+                    
+                    // Format phone number (remove leading zero and add country code if needed)
+                    $formattedPhone = $phoneToUse;
+                    if (substr($formattedPhone, 0, 1) === '0') {
+                        $formattedPhone = '233' . substr($formattedPhone, 1);
+                    }
+                    
+                    // Create SMS message with credentials
+                    $smsMessage = "Dear $full_name, your account on Outpouring Oasis CRM has been updated. Your login details are: Username: $username, Password: $newPassword, Role: $roleName. Please change your password after login.";
+                    
+                    // Send SMS
+                    $smsResponse = sendSMS($formattedPhone, $smsMessage);
+                    
+                    // Log SMS status
+                    $logger->log(
+                        'sms_notification', 
+                        'users', 
+                        $_POST['id'],
+                        "SMS notification for updated user account", 
+                        $_SESSION['user_id'],
+                        [
+                            'phone' => $formattedPhone,
+                            'status' => $smsResponse['status'],
+                            'response' => $smsResponse['response']
+                        ],
+                        $smsResponse['status'] === 'success' ? 'success' : 'failed'
+                    );
+                }
+
                 $pdo->commit();
                 $_SESSION['message'] = "<div class='alert alert-success'>User updated successfully!</div>";
                 header('Location: view_users.php');
@@ -301,29 +474,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <html lang="en">
 <head>
   <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <title>Manage Users - ChurchEaseSuperb</title>
-    <meta content='width=device-width, initial-scale=1.0, shrink-to-fit=no' name='viewport' />
-   <link rel="icon" href="../loginres/images/favicon/favicon.ico" type="image/x-icon"/>
-        <link rel="apple-touch-icon" sizes="180x180" href="../loginres/images/favicon/apple-touch-icon.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="../loginres/images/favicon/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="../loginres/images/favicon/favicon-16x16.png">
-       <!-- Fonts and icons -->
-    <script src="../res/assets/js/plugin/webfont/webfont.min.js"></script>
-    <script>
-        WebFont.load({
-            google: {"families":["Lato:300,400,700,900"]},
-            custom: {"families":["Flaticon", "Font Awesome 5 Solid", "Font Awesome 5 Regular", "Font Awesome 5 Brands", "simple-line-icons"], urls: ['../res/assets/css/fonts.min.css']},
-            active: function() {
-                sessionStorage.fonts = true;
-            }
-        });
-    </script>
-    
+        <title><?php echo isset($member) ? 'Edit' : 'Add'; ?> Member - ChurchEase</title>
+        <meta content='width=device-width, initial-scale=1.0, shrink-to-fit=no' name='viewport' />
+        <link rel="icon" href="../res/assets/img/icon.ico" type="image/x-icon"/>
 
-    <!-- CSS Files -->
-    <link rel="stylesheet" href="../res/assets/css/bootstrap.min.css">
-    <link rel="stylesheet" href="../res/assets/css/atlantis.min.css">
-    
+        <!-- Fonts and icons -->
+        <script src="../res/assets/js/plugin/webfont/webfont.min.js"></script>
+        <script>
+            WebFont.load({
+                google: {"families": ["Lato:300,400,700,900"]},
+                custom: {"families": ["Flaticon", "Font Awesome 5 Solid", "Font Awesome 5 Regular", "Font Awesome 5 Brands", "simple-line-icons"], urls: ['../res/assets/css/fonts.min.css']},
+                active: function () {
+                    sessionStorage.fonts = true;
+                }
+            });
+        </script>
+
+        <!-- CSS Files -->
+        <link rel="stylesheet" href="../res/assets/css/bootstrap.min.css">
+        <link rel="stylesheet" href="../res/assets/css/atlantis.min.css">
 </head>
 <body>
     <div class="wrapper">
@@ -376,41 +545,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                                     <select name="member_id" class="form-control select2" style="width: 100%">
                                                         <option value="">Select Member (Optional)</option>
                                                         <?php
-                                                        // Check if 'name' column exists in members table
-                                                        $checkColumnStmt = $pdo->query("SHOW COLUMNS FROM members LIKE 'name'");
-                                                        $nameColumnExists = $checkColumnStmt->rowCount() > 0;
-                                                        
-                                                        if ($nameColumnExists) {
-                                                            // Use the name column if it exists
-                                                            $memberStmt = $pdo->query("SELECT id, name, contact_number_1 
-                                                                                  FROM members 
-                                                                                  WHERE id NOT IN (
-                                                                                      SELECT member_id 
-                                                                                      FROM users 
-                                                                                      WHERE member_id IS NOT NULL" . 
-                                                                                      (isset($editUser) ? 
-                                                                                       " AND id != " . $editUser['id'] : "") . 
-                                                                                  ") ORDER BY name");
-                                                        } else {
-                                                            // Concatenate first_name and surname if name column doesn't exist
-                                                            $memberStmt = $pdo->query("SELECT id, CONCAT(first_name, ' ', surname) as name, contact_number_1 
-                                                                                  FROM members 
-                                                                                  WHERE id NOT IN (
-                                                                                      SELECT member_id 
-                                                                                      FROM users 
-                                                                                      WHERE member_id IS NOT NULL" . 
-                                                                                      (isset($editUser) ? 
-                                                                                       " AND id != " . $editUser['id'] : "") . 
-                                                                                  ") ORDER BY first_name, surname");
-                                                        }
-                                                        
+                                                        $memberStmt = $pdo->query("SELECT id, name, phone 
+                                                                                 FROM members 
+                                                                                 WHERE id NOT IN (
+                                                                                     SELECT member_id 
+                                                                                     FROM users 
+                                                                                     WHERE member_id IS NOT NULL" . 
+                                                                                     (isset($editUser) ? 
+                                                                                      " AND id != " . $editUser['id'] : "") . 
+                                                                                 ") ORDER BY name");
                                                         while ($member = $memberStmt->fetch()) {
                                                             $selected = (isset($editUser) && 
                                                                        $editUser['member_id'] == $member['id']) ? 
                                                                        'selected' : '';
                                                             echo "<option value='{$member['id']}' {$selected}>" . 
                                                                  htmlspecialchars($member['name'] . ' ' . 
-                                                                  ' (' . $member['contact_number_1'] . ')') . 
+                                                                  ' (' . $member['phone'] . ')') . 
                                                                  "</option>";
                                                         }
                                                         ?>
@@ -456,18 +606,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                             <div class="col-md-6">
                                                 <div class="form-group">
                                                     <label>Role</label>
-                                                    <select name="role" class="form-control" required>
-                                                        <?php if (!empty($available_roles)): ?>
-                                                            <?php foreach ($available_roles as $role): ?>
-                                                                <option value="<?php echo htmlspecialchars($role['role_key']); ?>"
-                                                                    <?php echo (isset($editUser) && $editUser['role'] === $role['role_key']) ? 'selected' : ''; ?>>
-                                                                    <?php echo htmlspecialchars($role['name']); ?>
-                                                                </option>
-                                                            <?php endforeach; ?>
-                                                        <?php else: ?>
-                                                            <option value="">No roles available</option>
-                                                        <?php endif; ?>
-                                                    </select>
+                                                  <select name="role" class="form-control" required>
+                                                      <?php if (!empty($available_roles)): ?>
+                                                          <?php foreach ($available_roles as $role): ?>
+                                                              <option value="<?php echo htmlspecialchars($role['role_key']); ?>"
+                                                                  <?php echo (isset($editUser) && 
+                                                                           isset($editUser['role_key']) && 
+                                                                           $editUser['role_key'] === $role['role_key']) ? 'selected' : ''; ?>>
+                                                                  <?php echo htmlspecialchars(ucfirst($role['role_key'])); ?>
+                                                              </option>
+                                                          <?php endforeach; ?>
+                                                      <?php else: ?>
+                                                          <option value="">No roles available</option>
+                                                      <?php endif; ?>
+                                                  </select>
                                                     <?php if (empty($available_roles)): ?>
                                                         <small class="text-danger">Contact an administrator if you need to assign roles.</small>
                                                     <?php endif; ?>

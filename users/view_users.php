@@ -1,5 +1,6 @@
 <?php
 require_once '../includes/auth.php';
+require_once '../includes/AuditLogger.php';
 
 // Add session check
 if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role'])) {
@@ -8,12 +9,49 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role'])) {
 }
 
 // Check if user has appropriate role - only seer and executive admins can access this dashboard
-$allowedRoles = ['admin', 'executive_admin_1','audit'];
+$allowedRoles = ['seer', 'executive_admin_1','audit'];
 if (!in_array($_SESSION['user_role'], $allowedRoles)) {
     header('Location: /outpouringcrm/access_denied.php');
     exit();
 }
 
+// Get current user information
+$currentUserStmt = $pdo->prepare("SELECT * FROM users WHERE id = ?");
+$currentUserStmt->execute([$_SESSION['user_id']]);
+$currentUser = $currentUserStmt->fetch();
+
+// Create function to send SMS using mNotify
+function sendSMS($phone, $message) {
+    $apiKey = MNOTIFY_API_KEY;
+    $senderId = MNOTIFY_SENDER_ID;
+    $url = 'https://apps.mnotify.net/smsapi';
+
+    $queryParams = http_build_query([
+        'key' => $apiKey,
+        'to' => $phone,
+        'msg' => $message,
+        'sender_id' => $senderId
+    ]);
+
+    $fullUrl = $url . '?' . $queryParams;
+
+    // Use file_get_contents to send the request
+    $response = file_get_contents($fullUrl);
+
+    if ($response === FALSE) {
+        return [
+            'status' => 'error',
+            'response' => 'Failed to send SMS'
+        ];
+    }
+
+    return [
+        'status' => 'success',
+        'response' => $response
+    ];
+}
+
+$logger = new AuditLogger($pdo);
 $message = '';
 if (isset($_SESSION['message'])) {
     $message = $_SESSION['message'];
@@ -30,6 +68,143 @@ if (isset($_POST['change_status'])) {
         $message = "<div class='alert alert-danger'>Error updating status: " . $e->getMessage() . "</div>";
     }
 }
+
+// Handle password reset and SMS
+if (isset($_POST['reset_password'])) {
+    try {
+        // Get user information including member_id
+        $userStmt = $pdo->prepare("SELECT u.*, m.contact_number_1, m.first_name, m.surname 
+                                  FROM users u 
+                                  LEFT JOIN members m ON u.member_id = m.id 
+                                  WHERE u.id = ?");
+        $userStmt->execute([$_POST['user_id']]);
+        $user = $userStmt->fetch();
+        
+        if (!$user) {
+            throw new Exception("User not found in the database");
+        }
+        
+        // Get phone number (first try member contact, then user phone)
+        $phone = !empty($user['contact_number_1']) ? $user['contact_number_1'] : $user['phone'];
+        
+        if (empty($phone)) {
+            throw new Exception("User does not have a phone number. Please update their profile with a phone number first.");
+        }
+        
+        // Format phone number to be used as username/password
+        $phone = preg_replace('/[^0-9]/', '', $phone); // Remove non-numeric characters
+        if (strlen($phone) === 10 && substr($phone, 0, 1) === '0') {
+            $phone = '233' . substr($phone, 1); // Convert 0xx format to 233xx format
+        }
+        
+        // Update user credentials
+        $hashedPassword = password_hash($phone, PASSWORD_DEFAULT);
+        $updateStmt = $pdo->prepare("UPDATE users SET username = ?, password = ?, password_changed = 0 WHERE id = ?");
+        $updateStmt->execute([$phone, $hashedPassword, $user['id']]);
+        
+        // Get name for SMS
+        $name = '';
+        if (!empty($user['first_name']) && !empty($user['surname'])) {
+            $name = $user['first_name'] . ' ' . $user['surname'];
+        } elseif (!empty($user['full_name'])) {
+            $name = $user['full_name'];
+        } else {
+            $name = 'User';
+        }
+        
+        // Create SMS message
+        $message_text = "Dear {$name}, your Outpouring Oasis account credentials:\nUsername: {$phone}\nPassword: {$phone}\n\nPlease change your password after logging in.";
+        
+        // Send SMS
+        $response = sendSMS($phone, $message_text);
+        
+        // Log SMS details
+        $logger->log(
+            'password_reset',
+            'users',
+            $user['id'],
+            "Password reset and credentials sent via SMS",
+            null,
+            [
+                'phone' => $phone,
+                'username_updated' => true,
+                'api_response' => $response['response']
+            ],
+            $response['status'] == 'success' ? 'success' : 'failed'
+        );
+        
+        $message = "<div class='alert alert-success'>Password reset and new credentials sent to user via SMS!</div>";
+    } catch (Exception $e) {
+        $message = "<div class='alert alert-danger'>Error: " . $e->getMessage() . "</div>";
+        $logger->log('password_reset', 'users', $_POST['user_id'] ?? null, "Failed password reset attempt", null, null, 'failed', $e->getMessage());
+    }
+}
+
+// Handle sending SMS
+if (isset($_POST['send_sms'])) {
+    try {
+        // Get user information including member_id
+        $userStmt = $pdo->prepare("SELECT u.*, m.contact_number_1, m.first_name, m.surname 
+                                  FROM users u 
+                                  LEFT JOIN members m ON u.member_id = m.id 
+                                  WHERE u.id = ?");
+        $userStmt->execute([$_POST['user_id']]);
+        $user = $userStmt->fetch();
+
+        if (!$user) {
+            throw new Exception("User not found");
+        }
+
+        // Get phone number (first try member contact, then user phone)
+        $phone = !empty($user['contact_number_1']) ? $user['contact_number_1'] : $user['phone'];
+
+        if (empty($phone)) {
+            throw new Exception("No phone number found for this user");
+        }
+
+        // Format phone number for Ghana
+        $phone = preg_replace('/[^0-9]/', '', $phone);
+        if (strlen($phone) === 10 && substr($phone, 0, 1) === '0') {
+            $phone = '233' . substr($phone, 1);
+        }
+
+        // Get name (first try member name, then user full_name, then username)
+        $name = '';
+        if (!empty($user['first_name']) && !empty($user['surname'])) {
+            $name = $user['first_name'] . ' ' . $user['surname'];
+        } elseif (!empty($user['full_name'])) {
+            $name = $user['full_name'];
+        } else {
+            $name = $user['username'];
+        }
+
+        // Prepare message with debug info
+        $message_text = $_POST['message'] . "\n";
+
+        // Send SMS
+        $response = sendSMS($phone, $message_text);
+
+        // Log the SMS sending
+        $logger->log(
+            'send_sms',
+            'users',
+            $user['id'],
+            "SMS sent to user",
+            null,
+            [
+                'phone' => $phone,
+                'message' => $message_text,
+                'response' => $response['response']
+            ],
+            $response['status'] == 'success' ? 'success' : 'failed'
+        );
+
+        $message = "<div class='alert alert-success'>SMS sent successfully!</div>";
+    } catch (Exception $e) {
+        $message = "<div class='alert alert-danger'>Error: " . $e->getMessage() . "</div>";
+        $logger->log('send_sms', 'users', $_POST['user_id'] ?? null, "Failed SMS attempt", null, null, 'failed', $e->getMessage());
+    }
+}
 ?>
 <!DOCTYPE html>
 <html lang="en">
@@ -37,11 +212,9 @@ if (isset($_POST['change_status'])) {
     <meta http-equiv="X-UA-Compatible" content="IE=edge" />
     <title>View Members - OutpouringCRM</title>
     <meta content='width=device-width, initial-scale=1.0, shrink-to-fit=no' name='viewport' />
-      <link rel="icon" href="../loginres/images/favicon/favicon.ico" type="image/x-icon"/>
-        <link rel="apple-touch-icon" sizes="180x180" href="../loginres/images/favicon/apple-touch-icon.png">
-    <link rel="icon" type="image/png" sizes="32x32" href="../loginres/images/favicon/favicon-32x32.png">
-    <link rel="icon" type="image/png" sizes="16x16" href="../loginres/images/favicon/favicon-16x16.png">
-       <!-- Fonts and icons -->
+    <link rel="icon" href="../res/assets/img/icon.ico" type="image/x-icon"/>
+    
+    <!-- Fonts and icons -->
     <script src="../res/assets/js/plugin/webfont/webfont.min.js"></script>
     <script>
         WebFont.load({
@@ -143,16 +316,29 @@ if (isset($_POST['change_status'])) {
                                             </thead>
                                             <tbody>
                                                 <?php
-                                                $stmt = $pdo->query("SELECT u.*,r.*,
-                                                                           name as member_name,
-                                                                           m.phone as member_phone
-                                                                    FROM users u 
-                                                                    LEFT JOIN members m ON u.member_id = m.id 
-                                                                    LEFT JOIN user_roles r ON u.id = r.user_id 
-                                                                    ORDER BY u.created_at DESC");
+                                                $stmt = $pdo->query("SELECT 
+                                                    u.id as user_id,
+                                                    u.username,
+                                                    u.full_name,
+                                                    u.email,
+                                                    u.profile_image,
+                                                    u.status,
+                                                    u.last_login,
+                                                    u.member_id,
+                                                    u.department,
+                                                    u.created_at,
+                                                    r.role_key,
+                                                    CONCAT(m.first_name, ' ', m.surname) as member_name,
+                                                    m.contact_number_1 as member_phone,
+                                                    m.id as member_id,
+                                                    m.email as member_email
+                                                FROM users u 
+                                                LEFT JOIN members m ON u.member_id = m.id 
+                                                LEFT JOIN user_roles r ON u.id = r.user_id 
+                                                ORDER BY u.created_at DESC");
                                                 while ($row = $stmt->fetch()) {
                                                     echo "<tr>";
-                                                    echo "<td>{$row['id']}</td>";
+                                                    echo "<td>{$row['user_id']}</td>";
                                                     echo "<td>";
                                                     if ($row['profile_image']) {
                                                         echo "<img src='../" . htmlspecialchars($row['profile_image']) . 
@@ -187,27 +373,39 @@ if (isset($_POST['change_status'])) {
                                                          date('M d, Y H:i', strtotime($row['last_login'])) : 'Never') . 
                                                          "</td>";
                                                     echo "<td>";
-                                                    if ($row['role_key'] === 'seer' || 
-                                                        ($row['role_key'] === 'executive_admin_1' && $row['role'] !== 'seer')) {
-                                                        echo "<div class='btn-group'>";
-                                                        echo "<a href='manage_user.php?id={$row['id']}' 
+                                                  
+                                                            echo "<div class='btn-group'>";
+                                                        echo "<a href='manage_user.php?id={$row['user_id']}' 
                                                               class='btn btn-primary btn-sm' title='Edit'>
                                                               <i class='fa fa-edit'></i></a>";
-                                                        if ($row['id'] !== $user['id']) {
+                                                        if ($row['user_id'] !== $currentUser['id']) {
                                                             echo "<button type='button' 
                                                                   class='btn btn-" . 
                                                                   ($row['status'] === 'active' ? 'warning' : 'success') . 
                                                                   " btn-sm' 
-                                                                  onclick='changeStatus({$row['id']}, \"" . 
+                                                                  onclick='changeStatus({$row['user_id']}, \"" . 
                                                                   ($row['status'] === 'active' ? 'suspended' : 'active') . 
                                                                   "\")' title='" . 
                                                                   ($row['status'] === 'active' ? 'Suspend' : 'Activate') . 
                                                                   "'><i class='fa fa-" . 
                                                                   ($row['status'] === 'active' ? 'ban' : 'check') . 
                                                                   "'></i></button>";
+                                                             
+                                                             // Add SMS credentials button
+                                                             echo "<button type='button' 
+                                                                   class='btn btn-info btn-sm' 
+                                                                   onclick='sendCredentials({$row['user_id']})' 
+                                                                   title='Send Credentials via SMS'>
+                                                                   <i class='fa fa-sms'></i></button>";
+                                                             // Add SMS button
+                                                             echo "<button type='button' 
+                                                                   class='btn btn-info btn-sm' 
+                                                                   onclick='sendSMS({$row['user_id']})' 
+                                                                   title='Send SMS'>
+                                                                   <i class='fa fa-envelope'></i></button>";
                                                         }
                                                         echo "</div>";
-                                                    }
+                                                   
                                                     echo "</td>";
                                                     echo "</tr>";
                                                 }
@@ -230,6 +428,19 @@ if (isset($_POST['change_status'])) {
         <input type="hidden" name="user_id" id="statusUserId">
         <input type="hidden" name="status" id="statusValue">
         <input type="hidden" name="change_status" value="1">
+    </form>
+    
+    <!-- Password Reset Form -->
+    <form id="resetPasswordForm" method="POST" style="display: none;">
+        <input type="hidden" name="user_id" id="resetPasswordUserId">
+        <input type="hidden" name="reset_password" value="1">
+    </form>
+
+    <!-- SMS Form -->
+    <form id="smsForm" method="POST" style="display: none;">
+        <input type="hidden" name="user_id" id="smsUserId">
+        <input type="hidden" name="message" id="smsMessage">
+        <input type="hidden" name="send_sms" value="1">
     </form>
 
     <!-- Core JS Files -->
@@ -292,6 +503,22 @@ if (isset($_POST['change_status'])) {
                 document.getElementById('statusUserId').value = userId;
                 document.getElementById('statusValue').value = status;
                 document.getElementById('statusForm').submit();
+            }
+        }
+        
+        function sendCredentials(userId) {
+            if (confirm('Are you sure you want to reset this user\'s password and send their credentials via SMS?')) {
+                document.getElementById('resetPasswordUserId').value = userId;
+                document.getElementById('resetPasswordForm').submit();
+            }
+        }
+        
+        function sendSMS(userId) {
+            var message = prompt('Enter your message:');
+            if (message) {
+                document.getElementById('smsUserId').value = userId;
+                document.getElementById('smsMessage').value = message;
+                document.getElementById('smsForm').submit();
             }
         }
     </script>

@@ -9,7 +9,7 @@ if (!isset($_SESSION['user_id']) || !isset($_SESSION['user_role'])) {
 }
 
 // Check if user has appropriate role
-if ($_SESSION['user_role'] !== 'member') {
+if ($_SESSION['user_role'] !== 'general') {
     header('Location: /outpouringcrm/index.php?error=unauthorized');
     exit();
 }

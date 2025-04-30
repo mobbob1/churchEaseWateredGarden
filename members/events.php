@@ -4,7 +4,7 @@ require_once '../includes/auth.php';
 require_once '../includes/SessionManager.php';
 
 // Check if user is logged in and is a member
-if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'member') {
+if (!isset($_SESSION['user_id']) || $_SESSION['user_role'] !== 'general') {
     header('Location: /outpouringcrm/index.php');
     exit();
 }
@@ -45,6 +45,22 @@ $past_events = $stmt->fetchAll(PDO::FETCH_ASSOC);
     <title>Events - OutpouringCRM</title>
     <meta content='width=device-width, initial-scale=1.0, shrink-to-fit=no' name='viewport' />
     <link rel="icon" href="../res/assets/img/icon.ico" type="image/x-icon"/>
+    
+    <!-- CSS Files -->
+    <link rel="stylesheet" href="../res/assets/css/bootstrap.min.css">
+    <link rel="stylesheet" href="../res/assets/css/atlantis.min.css">
+    
+      <!-- Fonts and icons -->
+    <script src="../res/assets/js/plugin/webfont/webfont.min.js"></script>
+    <script>
+        WebFont.load({
+            google: {"families":["Lato:300,400,700,900"]},
+            custom: {"families":["Flaticon", "Font Awesome 5 Solid", "Font Awesome 5 Regular", "Font Awesome 5 Brands", "simple-line-icons"], urls: ['../res/assets/css/fonts.min.css']},
+            active: function() {
+                sessionStorage.fonts = true;
+            }
+        });
+    </script>
     
     <!-- CSS Files -->
     <link rel="stylesheet" href="../res/assets/css/bootstrap.min.css">
